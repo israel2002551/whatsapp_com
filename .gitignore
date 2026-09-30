@@ -1,0 +1,13 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+wa_auth_session/
+
+# Dependencies
+node_modules/
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
