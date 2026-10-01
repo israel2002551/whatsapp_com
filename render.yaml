@@ -23,7 +23,9 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: qwen/qwen3.8-27b
+      - key: WHATSAPP_LISTINGS_SELLER_ID
+        value: e525b6d9-4f81-4522-822d-119151671dba
       - key: PUBLIC_SITE_URL
         sync: false
       - key: WHATSAPP_PHONE_NUMBER
