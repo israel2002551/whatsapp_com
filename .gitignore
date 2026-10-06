@@ -3,6 +3,8 @@
 .env.local
 .env.*.local
 wa_auth_session/
+wa_admin_dispatcher_session/
+notified_sales.json
 
 # Dependencies
 node_modules/
