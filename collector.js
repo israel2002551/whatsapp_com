@@ -2,16 +2,17 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   extractMessageContent,
+  fetchLatestWaWebVersion,
   normalizeMessageContent,
-  useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
-import { rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import { BuySellListingsApi } from './buysell-api.js';
 import { buildAdminSaleAlert } from './sale-alert.js';
+import { openAuthState } from './auth-store.js';
 
 const api = new BuySellListingsApi();
 const phoneNumber = (process.env.WHATSAPP_PHONE_NUMBER || '2348080302256').replace(/\D/g, '');
@@ -107,13 +108,51 @@ async function checkAndNotifySales() {
   }
 }
 
+// The WhatsApp Web version bundled with Baileys goes stale between releases.
+// WhatsApp still opens the socket for an outdated client but rejects the
+// phone-number link step ("Couldn't link device"), so use the live version.
+let cachedWaWebVersion = null;
+async function resolveWaWebVersion() {
+  try {
+    const { version, isLatest } = await fetchLatestWaWebVersion({ timeout: 10_000 });
+    if (isLatest && Array.isArray(version)) cachedWaWebVersion = version;
+  } catch (error) {
+    console.warn('[Bot 1] Could not fetch the latest WhatsApp Web version:', error?.message || error);
+  }
+  return cachedWaWebVersion || undefined;
+}
+
+// When another copy takes over the connection (code 440), it is usually the new
+// copy started by a deploy while this one still runs. Reconnecting at once makes
+// the two fight over one session until WhatsApp logs the device out, so wait.
+const REPLACED_RETRY_MS = 3 * 60_000;
+let activeAuth = null;
+
+function restartDispatcher(delayMs) {
+  setTimeout(() => {
+    startDispatcher().catch(error => {
+      console.error('[Bot 1] Could not restart the WhatsApp connection:', error?.message || error);
+      restartDispatcher(30_000);
+    });
+  }, delayMs);
+}
+
 async function startDispatcher() {
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  // WHATSAPP_AUTH_STORE=supabase keeps the session in Supabase, so redeploys don't
+  // unlink the bot; otherwise it lives in SESSION_DIR (lost on Render's free disk).
+  const auth = await openAuthState({ api, sessionDir });
+  activeAuth = auth;
+  console.info(`[Session] WhatsApp session stored in ${auth.description}.`);
+  const { state, saveCreds } = auth;
+  const waWebVersion = await resolveWaWebVersion();
 
   const sock = makeWASocket({
+    ...(waWebVersion ? { version: waWebVersion } : {}),
     logger: pino({ level: 'silent' }),
     auth: state,
-    browser: Browsers.ubuntu('Chrome'),
+    // WhatsApp rejects phone-number linking for the Ubuntu identity
+    // ("Couldn't link device"); the macOS identity pairs successfully.
+    browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: true,
     syncFullHistory: false,
     shouldIgnoreJid: (jid) => jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter'),
@@ -158,15 +197,22 @@ async function startDispatcher() {
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = code === DisconnectReason.loggedOut;
-      const reconnect = !isLoggedOut;
-      console.warn(`[Bot 1] WhatsApp connection closed (${code || 'unknown'}). Reconnect: ${reconnect}`);
-      if (isLoggedOut) {
-        console.warn('[Session] Session logged out. Resetting session directory.');
-        try { rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-      }
+      const isReplaced = code === DisconnectReason.connectionReplaced;
+      console.warn(`[Bot 1] WhatsApp connection closed (${code || 'unknown'}).`);
       try { sock.ws?.close(); } catch {}
       activeSock = null;
-      if (reconnect) setTimeout(startDispatcher, 3_000);
+      if (isLoggedOut) {
+        // Unlinked: start over with a fresh session and a new pairing code.
+        console.warn('[Session] Session logged out. Clearing it and requesting a new pairing code.');
+        auth.clear()
+          .catch(error => console.error('[Session] Could not clear the stored session:', error?.message || error))
+          .finally(() => restartDispatcher(3_000));
+        return;
+      }
+      if (isReplaced) {
+        console.warn(`[Bot 1] Another copy of Bot 1 took over the WhatsApp connection. Reconnecting in ${REPLACED_RETRY_MS / 60_000} minutes.`);
+      }
+      restartDispatcher(isReplaced ? REPLACED_RETRY_MS : 3_000);
     }
   });
 
@@ -292,6 +338,21 @@ if (port) {
 
   server.listen(port, () => {
     console.info(`[HTTP] Admin Dispatcher health check listening on port ${port}`);
+  });
+}
+
+// Render stops the old copy with SIGTERM during a deploy: save the session, then exit.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.info(`[Bot 1] ${signal} received; saving the WhatsApp session and stopping.`);
+    try {
+      activeSock?.ev?.removeAllListeners?.();
+      activeSock?.ws?.close();
+    } catch {}
+    Promise.race([
+      Promise.resolve(activeAuth?.flush?.()).catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 8_000)),
+    ]).finally(() => process.exit(0));
   });
 }
 
