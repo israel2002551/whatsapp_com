@@ -13,7 +13,3 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
-
-# WhatsApp sessions under any folder name hold the account’s keys; never commit them.
-wa_*session*/
-pairing-qr.html

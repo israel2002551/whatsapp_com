@@ -62,16 +62,6 @@ Under the **Environment Variables** section on Render, add these keys:
    BUYSELL WhatsApp collector is monitoring approved groups.
    ```
 
-### If the code is refused: link by QR code from your computer
-
-WhatsApp can refuse phone-number codes ("Couldn’t link device"). Linking by QR code from your own computer works, and keeping the session in Supabase stops redeploys from unlinking the bot:
-
-1. Suspend Bot 1 on Render so only one copy uses the session.
-2. In this folder, with your `.env` in place, run `npm run pair-qr`. A page with a QR code opens in your browser.
-3. On the phone, in the WhatsApp account Bot 1 should use, go to **Settings → Linked devices → Link a device** and scan the code. The script saves the session to `SESSION_DIR` and stops.
-4. Upload it for Render with `node upload-session.js --replace`. Your `.env` needs `WHATSAPP_AUTH_SESSION_ID=bot1` and the same `WHATSAPP_AUTH_ENCRYPTION_KEY` as Render.
-5. On Render, set `WHATSAPP_AUTH_STORE=supabase`, `WHATSAPP_AUTH_SESSION_ID=bot1` and that key, then resume the service.
-
 ---
 
 ## Health Check Endpoint
