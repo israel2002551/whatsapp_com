@@ -80,9 +80,13 @@ function extractText(msg) {
 }
 
 let activeSock = null;
+let whatsappConnected = false;
 
 async function checkAndNotifySales() {
-  if (!activeSock) return;
+  // A socket is created before WhatsApp has accepted its credentials. Do not
+  // attempt to deliver alerts during pairing or a reconnect, because Baileys
+  // will reject the send and leave the order looking like a delivery failure.
+  if (!activeSock || !whatsappConnected) return;
   try {
     const result = await api.getOrderWhatsAppSales();
     const sales = Array.isArray(result?.sales) ? result.sales : [];
@@ -162,45 +166,58 @@ async function startDispatcher() {
     },
   });
   activeSock = sock;
+  let pairingCodeRequestedOnSocket = false;
 
   sock.ev.on('creds.update', saveCreds);
 
-  if (phoneNumber && !state.creds.registered) {
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(phoneNumber);
-        const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
-        console.log('\n============================================================');
-        console.log(`[BOT 1 DISPATCHER] PAIRING CODE FOR ${phoneNumber}: ${formatted}`);
-        console.log('============================================================');
-        console.log(`On your phone (${phoneNumber}):`);
-        console.log('1. Open WhatsApp -> Settings -> Linked Devices');
-        console.log('2. Tap "Link a device" -> "Link with phone number instead"');
-        console.log(`3. Enter code: ${formatted}\n`);
-      } catch (err) {
-        console.error('[Bot 1] Failed to request pairing code:', err?.message || err);
-      }
-    }, 3000);
+  async function requestPairingCode() {
+    try {
+      const code = await sock.requestPairingCode(phoneNumber);
+      const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+      console.log('\n============================================================');
+      console.log(`[BOT 1 DISPATCHER] PAIRING CODE FOR ${phoneNumber}: ${formatted}`);
+      console.log('============================================================');
+      console.log(`On your phone (${phoneNumber}):`);
+      console.log('1. Open WhatsApp -> Settings -> Linked Devices');
+      console.log('2. Tap "Link a device" -> "Link with phone number instead"');
+      console.log(`3. Enter code: ${formatted}\n`);
+    } catch (err) {
+      // Allow a later QR-ready event from this socket to retry the request.
+      pairingCodeRequestedOnSocket = false;
+      console.error('[Bot 1] Failed to request pairing code:', err?.message || err);
+    }
   }
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    // Baileys emits a QR reference even when phone-number pairing is selected.
+    // Waiting for it matters: requesting a code on a fixed startup timer can
+    // produce a code that WhatsApp displays but subsequently refuses.
+    if (qr && phoneNumber && !state.creds.registered && !pairingCodeRequestedOnSocket) {
+      pairingCodeRequestedOnSocket = true;
+      void requestPairingCode();
+    }
+
     if (qr && !phoneNumber) {
       console.log('[BOT 1 DISPATCHER] Scan QR code to link:');
       qrcode.generate(qr, { small: true });
     }
     if (connection === 'open') {
+      if (activeSock !== sock) return;
+      whatsappConnected = true;
       console.log(`BUYSELL Admin Dispatcher (Bot 1) is ACTIVE. Admin alert target: +${adminPhoneNumber}`);
       sock.sendPresenceUpdate('available').catch(() => {});
       // Check for sales immediately upon connection
       checkAndNotifySales().catch(() => {});
     }
     if (connection === 'close') {
+      if (activeSock !== sock) return;
       const code = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = code === DisconnectReason.loggedOut;
       const isReplaced = code === DisconnectReason.connectionReplaced;
       console.warn(`[Bot 1] WhatsApp connection closed (${code || 'unknown'}).`);
       try { sock.ws?.close(); } catch {}
       activeSock = null;
+      whatsappConnected = false;
       if (isLoggedOut) {
         // Unlinked: start over with a fresh session and a new pairing code.
         console.warn('[Session] Session logged out. Clearing it and requesting a new pairing code.');
@@ -311,11 +328,14 @@ if (port) {
       req.on('end', async () => {
         try {
           const payload = JSON.parse(bodyStr || '{}');
-          if (payload && activeSock) {
-            const message = buildAdminSaleAlert(payload);
-            const targetJid = `${adminPhoneNumber}@s.whatsapp.net`;
-            await activeSock.sendMessage(targetJid, { text: message });
+          if (!activeSock || !whatsappConnected) {
+            res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '20' });
+            res.end(JSON.stringify({ status: 'not_connected', error: 'WhatsApp is still pairing or reconnecting.' }));
+            return;
           }
+          const message = buildAdminSaleAlert(payload);
+          const targetJid = `${adminPhoneNumber}@s.whatsapp.net`;
+          await activeSock.sendMessage(targetJid, { text: message });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'sent' }));
         } catch (e) {
@@ -331,6 +351,7 @@ if (port) {
       status: 'ok',
       service: 'buysell-admin-dispatcher',
       admin_phone: adminPhoneNumber,
+      whatsapp_connected: whatsappConnected,
       alerts_sent: notifiedSales.size,
       uptime: Math.round(process.uptime()),
     }));
