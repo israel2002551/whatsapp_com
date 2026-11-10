@@ -11,6 +11,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import { BuySellListingsApi } from './buysell-api.js';
+import { buildAdminSaleAlert } from './sale-alert.js';
 
 const api = new BuySellListingsApi();
 const phoneNumber = (process.env.WHATSAPP_PHONE_NUMBER || '2348080302256').replace(/\D/g, '');
@@ -77,46 +78,6 @@ function extractText(msg) {
   ).trim();
 }
 
-function cleanPhone(raw) {
-  let digits = String(raw || '').replace(/\D/g, '');
-  if (digits.startsWith('0') && digits.length === 11) {
-    digits = '234' + digits.slice(1);
-  }
-  return digits;
-}
-
-function formatMoney(amount) {
-  return `₦${Number(amount || 0).toLocaleString('en-NG')}`;
-}
-
-function buildAdminSaleAlert(sale) {
-  const sellerNum = cleanPhone(sale.seller_phone);
-  const waLink = sellerNum ? `https://wa.me/${sellerNum}` : 'No phone provided';
-  const orderShort = String(sale.order_id || '').slice(0, 8);
-
-  return [
-    '🚨 *NEW ORDER: WHATSAPP ITEM PURCHASED!* 🛍️',
-    '',
-    `📦 *Product:* ${sale.product_name || 'Marketplace Item'}`,
-    `💰 *Amount Paid by Buyer:* ${formatMoney(sale.paid_price)}`,
-    `🧾 *Order ID:* #${orderShort}`,
-    '',
-    '📍 *WHERE BOT 2 COLLECTED THIS:*',
-    `👥 *Group Name:* ${sale.group_name || 'Seller Group'}`,
-    `🆔 *Group ID:* \`${sale.group_jid || 'unknown'}\``,
-    sale.source_price ? `💵 *Original Stated Price:* ${formatMoney(sale.source_price)}` : '',
-    sellerNum ? `📱 *Original Seller Phone:* +${sellerNum}` : '',
-    sellerNum ? `💬 *Tap to Chat with Seller:*\n${waLink}` : '',
-    '',
-    '🚚 *DELIVERY DETAILS:*',
-    `👤 *Buyer Name:* ${sale.delivery_name || 'Customer'}`,
-    sale.delivery_phone ? `📞 *Buyer Phone:* ${sale.delivery_phone}` : '',
-    sale.delivery_address ? `🏠 *Delivery Address:* ${sale.delivery_address}` : '',
-    '',
-    '👉 *Next Step:* Tap the seller link above to confirm availability and purchase the item for delivery!',
-  ].filter(Boolean).join('\n');
-}
-
 let activeSock = null;
 
 async function checkAndNotifySales() {
@@ -155,6 +116,7 @@ async function startDispatcher() {
     browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: true,
     syncFullHistory: false,
+    shouldIgnoreJid: (jid) => jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter'),
     getMessage: async (key) => {
       const msg = messageStore.get(key.id);
       return msg?.message || undefined;
